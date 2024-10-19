@@ -54,3 +54,23 @@ You can ask the community for help in [the discussions section](https://github.c
 All code, practices and patterns in this repository are DAMN VULNERABLE and for educational purposes only.
 
 DO NOT USE IN PRODUCTION.
+
+# Challenges solved
+1. Unstoppable ✅
+2. Naive receiver
+3. Truster
+4. Side Entrance
+5. The Rewarder
+6. Selfie
+7. Compromised
+8. Puppet
+9. Puppet V2
+10. Free Rider
+11. Backdoor
+12. Climber
+13. Wallet Mining
+14. Puppet V3
+15. ABI Smuggling
+16. Shards
+17. Curvy Puppet
+18. Withdrawal
