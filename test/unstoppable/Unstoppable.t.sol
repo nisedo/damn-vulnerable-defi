@@ -91,7 +91,24 @@ contract UnstoppableChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_unstoppable() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * The UnstoppableVault has an invariant check in flashLoan() at line 85:
+         *   if (convertToShares(totalSupply) != balanceBefore) revert InvalidBalance();
+         * 
+         * This check assumes totalAssets() (token balance) and totalSupply (shares) grow together
+         * through the deposit() mechanism. However, if tokens are transferred directly to the vault
+         * (bypassing deposit()), totalAssets() increases while totalSupply stays the same,
+         * breaking the invariant and causing all flash loans to revert.
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Simply transfer tokens directly to the vault using transfer() instead of deposit()
+         * 2. This breaks the ERC4626 share/asset ratio invariant
+         * 3. All subsequent flash loan attempts will revert with InvalidBalance()
+         */
         
+        // Transfer tokens directly to the vault, breaking the share/asset invariant
+        token.transfer(address(vault), INITIAL_PLAYER_TOKEN_BALANCE);
     }
 
     /**
