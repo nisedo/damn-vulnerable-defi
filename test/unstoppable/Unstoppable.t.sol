@@ -4,7 +4,10 @@ pragma solidity =0.8.25;
 
 import {Test, console} from "forge-std/Test.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
-import {UnstoppableVault, Owned} from "../../src/unstoppable/UnstoppableVault.sol";
+import {
+    UnstoppableVault,
+    Owned
+} from "../../src/unstoppable/UnstoppableVault.sol";
 import {UnstoppableMonitor} from "../../src/unstoppable/UnstoppableMonitor.sol";
 
 contract UnstoppableChallenge is Test {
@@ -32,7 +35,11 @@ contract UnstoppableChallenge is Test {
         startHoax(deployer);
         // Deploy token and vault
         token = new DamnValuableToken();
-        vault = new UnstoppableVault({_token: token, _owner: deployer, _feeRecipient: deployer});
+        vault = new UnstoppableVault({
+            _token: token,
+            _owner: deployer,
+            _feeRecipient: deployer
+        });
 
         // Deposit tokens to vault
         token.approve(address(vault), TOKENS_IN_VAULT);
@@ -95,7 +102,7 @@ contract UnstoppableChallenge is Test {
          * VULNERABILITY EXPLANATION:
          * The UnstoppableVault has an invariant check in flashLoan() at line 85:
          *   if (convertToShares(totalSupply) != balanceBefore) revert InvalidBalance();
-         * 
+         *
          * This check assumes totalAssets() (token balance) and totalSupply (shares) grow together
          * through the deposit() mechanism. However, if tokens are transferred directly to the vault
          * (bypassing deposit()), totalAssets() increases while totalSupply stays the same,
@@ -106,7 +113,7 @@ contract UnstoppableChallenge is Test {
          * 2. This breaks the ERC4626 share/asset ratio invariant
          * 3. All subsequent flash loan attempts will revert with InvalidBalance()
          */
-        
+
         // Transfer tokens directly to the vault, breaking the share/asset invariant
         token.transfer(address(vault), INITIAL_PLAYER_TOKEN_BALANCE);
     }

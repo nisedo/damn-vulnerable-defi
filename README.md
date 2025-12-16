@@ -52,6 +52,27 @@ Challenges may have more than one possible solution.
 
 You can ask the community for help in [the discussions section](https://github.com/theredguild/damn-vulnerable-defi/discussions).
 
+## Solutions Progress
+
+- [x] Unstoppable
+- [ ] Naive Receiver
+- [ ] Truster
+- [ ] Side Entrance
+- [ ] The Rewarder
+- [ ] Selfie
+- [ ] Compromised
+- [ ] Puppet
+- [ ] Puppet V2
+- [ ] Puppet V3
+- [ ] Free Rider
+- [ ] Backdoor
+- [ ] Climber
+- [ ] Wallet Mining
+- [ ] ABI Smuggling
+- [ ] Shards
+- [ ] Withdrawal
+- [ ] Curvy Puppet
+
 ## Disclaimer
 
 All code, practices and patterns in this repository are DAMN VULNERABLE and for educational purposes only.
