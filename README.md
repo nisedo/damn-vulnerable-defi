@@ -9,7 +9,7 @@ Use Damn Vulnerable DeFi to:
 - Sharpen your auditing and bug-hunting skills.
 - Learn how to detect, test and fix flaws in realistic scenarios to become a security-minded developer.
 - Benchmark smart contract security tooling.
-- Create educational content on smart contract security with articles, tutorials, talks, courses, workshops, trainings, CTFs, etc. 
+- Create educational content on smart contract security with articles, tutorials, talks, courses, workshops, trainings, CTFs, etc.
 
 ## Install
 
@@ -54,24 +54,24 @@ You can ask the community for help in [the discussions section](https://github.c
 
 ## Solutions Progress
 
-- [x] Unstoppable
-- [x] Naive Receiver
-- [x] Truster
-- [x] Side Entrance
-- [x] The Rewarder
-- [x] Selfie
-- [x] Compromised
-- [x] Puppet
-- [x] Puppet V2
-- [x] Puppet V3
-- [x] Free Rider
-- [x] Backdoor
-- [x] Climber
-- [x] Wallet Mining
-- [x] ABI Smuggling
-- [ ] Shards
-- [x] Withdrawal
-- [ ] Curvy Puppet
+- [x] #1 Unstoppable
+- [x] #2 Naive Receiver
+- [x] #3 Truster
+- [x] #4 Side Entrance
+- [x] #5 The Rewarder
+- [x] #6 Selfie
+- [x] #7 Compromised
+- [x] #8 Puppet
+- [x] #9 Puppet V2
+- [x] #10 Free Rider
+- [x] #11 Backdoor
+- [x] #12 Climber
+- [x] #13 Wallet Mining
+- [x] #14 Puppet V3
+- [x] #15 ABI Smuggling
+- [x] #16 Shards
+- [ ] #17 Curvy Puppet
+- [x] #18 Withdrawal
 
 ## Disclaimer
 
