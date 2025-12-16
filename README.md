@@ -55,22 +55,22 @@ You can ask the community for help in [the discussions section](https://github.c
 ## Solutions Progress
 
 - [x] Unstoppable
-- [ ] Naive Receiver
-- [ ] Truster
-- [ ] Side Entrance
-- [ ] The Rewarder
-- [ ] Selfie
-- [ ] Compromised
-- [ ] Puppet
-- [ ] Puppet V2
-- [ ] Puppet V3
-- [ ] Free Rider
-- [ ] Backdoor
-- [ ] Climber
-- [ ] Wallet Mining
-- [ ] ABI Smuggling
+- [x] Naive Receiver
+- [x] Truster
+- [x] Side Entrance
+- [x] The Rewarder
+- [x] Selfie
+- [x] Compromised
+- [x] Puppet
+- [x] Puppet V2
+- [x] Puppet V3
+- [x] Free Rider
+- [x] Backdoor
+- [x] Climber
+- [x] Wallet Mining
+- [x] ABI Smuggling
 - [ ] Shards
-- [ ] Withdrawal
+- [x] Withdrawal
 - [ ] Curvy Puppet
 
 ## Disclaimer
